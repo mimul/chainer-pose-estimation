@@ -1,7 +1,6 @@
 # Chainer Realtime Multi-Person Pose Estimation
 
-[Realtime Multi-Person 2D Pose Estimation using Part Affinity Fields](https://arxiv.org/abs/1611.08050) 논문을 기반으로 FMS 동작(Deep Squat, Hurdle Step, In-line Lunge, Active Straight-leg Raise, Trunk Stability Push-up, Rotary Stability, Shoulder Mobility)을 인식해 FMS 점수에 유사한 평가지표를 만드는 목표에 앞서 동작을 인식하고 자세를 측정하는 모덿을 구현해 본다.
-
+[Realtime Multi-Person 2D Pose Estimation using Part Affinity Fields](https://arxiv.org/abs/1611.08050) 논문을 기반으로 FMS 동작(Deep Squat, Hurdle Step, In-line Lunge, Active Straight-leg Raise, Trunk Stability Push-up, Rotary Stability, Shoulder Mobility)을 인식해 FMS 점수에 유사한 평가지표를 만드는 목표에 앞서 동작을 인식하고 자세를 측정하는 모델을 구현해 본다.
 
 ## 차례
 1. [Converting caffe model](#convert-caffe-model-to-chainer-model)
@@ -17,9 +16,7 @@
 - OpenCV
 
 ## Convert Caffe model to Chainer model
-The authors of [the original implementation](https://github.com/ZheC/Realtime_Multi-Person_Pose_Estimation) provide trained caffe model
-which you can use to extract model weights.
-Execute the following commands to download the trained model and convert it to npz file:
+[참조한 프로젝트](https://github.com/ZheC/Realtime_Multi-Person_Pose_Estimation)에서  caffe model을 참고하여 변환하면 된다.
 
 ```
 > cd models
@@ -33,14 +30,13 @@ Execute the following commands to download the trained model and convert it to n
 ```
 
 ## Test using the trained model
-Execute the following command with the weight parameter file and the image file as arguments for estimating pose.
-The resulting image will be saved as `result.png`.
+우선 이미지 파일로 기존 trained model을 사용하여 동작이 제대로 인식되는지 평가해 본다.
 
 ```
 python pose_detector.py posenet models/coco_posenet.npz --images data/image/deep_squat.jpg data/image/hurdle_step.jpg data/image/in_line_lunge.jpg data/image/rotary_stability.jpg
 ```
 
-If you have a gpu device, use the `--gpu` option.
+gpu가 지원된다면 `--gpu` option을 사용하면 된다.
 
 ```
 python pose_detector.py posenet models/coco_posenet.npz --images data/image/deep_squat.jpg data/image/hurdle_step.jpg data/image/in_line_lunge.jpg data/image/rotary_stability.jpg --gpu 0
@@ -70,7 +66,7 @@ python pose_detector.py posenet models/coco_posenet.npz --images data/image/deep
 <img src="data/image_result/rotary_stability_result.png" width="400">
 </div>
 
-If you have a web camera, you can execute the following cammand to run real-time demostration mode with the camera activated. Quit with the `q` key.
+카메라가 지원되는 컴퓨터라면 실시간으로 동작을 인식하는 테스트를 할 수 있다. 종료는 `q`를 누르면 된다.
 
 <b>Real-time pose estimation:</b>
 
@@ -90,7 +86,7 @@ Cook에 의해 창안된 안정성과 가동성을 평가하기 위해 고안된
 *. FMS에서는 가동성과 안정성, 움직임 패턴을 확인할수 있다.
 - 가동성 운동(ASLR, SM)은 관절의 움직임 범위, 조직의 길이와 근육의 유연성을 확인한다.
 - 안정성 운동(TSPU,RS)은 각각의 움직임 패턴에서 시작과 끝 위치의 자세 통제를 목표로 한다.
-- 움직임 패턴(DS,HS,IL)은 협응력과 타이밍을 강화시키기 위하여 근본적 가동성과 안정성의 사용을 구체적인 움직임 패턴으로 통합하는 것입이다.
+- 움직임 패턴(DS,HS,IL)은 협응력과 타이밍을 강화시키기 위하여 근본적 가동성과 안정성의 사용을 구체적인 움직임 패턴으로 통합하는 것이다.
 
 ## 참조 리포지토리
 - CVPR'16, [Convolutional Pose Machines](https://github.com/shihenw/convolutional-pose-machines-release).
