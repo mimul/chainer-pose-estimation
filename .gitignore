@@ -4,8 +4,7 @@ __pycache__/
 cocoapi/
 coco/
 /coco
-result/
-result.png
+data/
 .ipynb_checkpoints
 *.caffemodel
 *.chainermodel

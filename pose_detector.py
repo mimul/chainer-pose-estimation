@@ -605,5 +605,8 @@ if __name__ == '__main__':
         if not os.path.exists(resultDir):
             os.makedirs(resultDir)
 
-        print('Saving result into result.png...')
-        cv2.imwrite(resultDir + get_filename_without_extension(file_name) + '_result.png', img)
+        file_body_name = get_filename_without_extension(file_name)
+        file_append_name = '_result.png'
+
+        print('Saving file into {}{}{}'.format(resultDir, file_body_name, file_append_name))
+        cv2.imwrite(resultDir + file_body_name + file_append_name, img)
