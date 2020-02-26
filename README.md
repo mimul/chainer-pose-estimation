@@ -33,13 +33,13 @@
 우선 이미지 파일로 기존 trained model을 사용하여 동작이 제대로 인식되는지 평가해 본다.
 
 ```
-python pose_detector.py posenet models/coco_posenet.npz --images data/image/deep_squat.jpg data/image/hurdle_step.jpg data/image/in_line_lunge.jpg data/image/rotary_stability.jpg
+> python pose_detector.py posenet models/coco_posenet.npz --images data/image/deep_squat.jpg data/image/hurdle_step.jpg data/image/in_line_lunge.jpg data/image/rotary_stability.jpg
 ```
 
 gpu가 지원된다면 `--gpu` option을 사용하면 된다.
 
 ```
-python pose_detector.py posenet models/coco_posenet.npz --images data/image/deep_squat.jpg data/image/hurdle_step.jpg data/image/in_line_lunge.jpg data/image/rotary_stability.jpg --gpu 0
+> python pose_detector.py posenet models/coco_posenet.npz --images data/image/deep_squat.jpg data/image/hurdle_step.jpg data/image/in_line_lunge.jpg data/image/rotary_stability.jpg --gpu 0
 ```
 
 <div align="center">
@@ -66,12 +66,10 @@ python pose_detector.py posenet models/coco_posenet.npz --images data/image/deep
 <img src="data/image_result/rotary_stability_result.png" width="400">
 </div>
 
-카메라가 지원되는 컴퓨터라면 실시간으로 동작을 인식하는 테스트를 할 수 있다. 종료는 `q`를 누르면 된다.
-
-<b>Real-time pose estimation:</b>
+카메라가 지원되는 컴퓨터라면 실시간으로 동작을 인식하는 테스트를 할 수 있다. 그리고 동영상을 분석할 수 있다. 종료는 `q`를 누르면 된다.
 
 ```
-python camera_pose_detector.py
+> python video_pose_detector.py --video data/video/hurdle_step_video.mp4
 ```
 
 ## About FMS
@@ -101,4 +99,4 @@ Please cite the original paper in your publications if it helps your research:
       author = {Zhe Cao and Tomas Simon and Shih-En Wei and Yaser Sheikh},
       booktitle = {The IEEE Conference on Computer Vision and Pattern Recognition (CVPR)},
       year = {2017}
-      }
+     }
