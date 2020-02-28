@@ -73,7 +73,7 @@ gpu가 지원된다면 `--gpu` option을 사용하면 된다.
 ```
 
 <div align="center">
-<img src="data/video_result/hurdle_step_video_result.png" width="400">
+<img src="data/video_result/hurdle_step_video_result.gif" width="400">
 </div>
 
 ## About FMS
