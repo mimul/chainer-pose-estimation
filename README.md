@@ -72,6 +72,10 @@ gpu가 지원된다면 `--gpu` option을 사용하면 된다.
 > python video_pose_detector.py --video data/video/hurdle_step_video.mp4
 ```
 
+<div align="center">
+<img src="data/video_result/hurdle_step_video_result.png" width="400">
+</div>
+
 ## About FMS
 Cook에 의해 창안된 안정성과 가동성을 평가하기 위해 고안된 움직임 패턴 평가로 불균형(Imbalances)과 약점(Weaknesses)이 나타나는 극단적 자세를 사용하여 7가지의 움직임 패턴을 통해 관절의 제한사항, 불균형, 비대칭, 보상작용 등을  평가할 수 있는 검사 방법이다.
 
