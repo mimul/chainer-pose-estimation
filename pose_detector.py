@@ -550,7 +550,7 @@ def draw_person_pose(orig_img, poses):
 
     canvas = orig_img.copy()
 
-    # limbs
+    # 부위
     for pose in poses.round().astype('i'):
         for i, (limb, color) in enumerate(zip(params['limbs_point'], limb_colors)):
             if i != 9 and i != 13:  # don't show ear-shoulder connection
@@ -559,7 +559,7 @@ def draw_person_pose(orig_img, poses):
                     joint1, joint2 = pose[limb_ind][:, :2]
                     cv2.line(canvas, tuple(joint1), tuple(joint2), color, 2)
 
-    # joints
+    # 관절
     for pose in poses.round().astype('i'):
         for i, ((x, y, v), color) in enumerate(zip(pose, joint_colors)):
             if v != 0:
@@ -588,7 +588,7 @@ if __name__ == '__main__':
 
     print(args.images)
 
-    # read image
+    # 이미지 읽기
     image_provider = ImageReader(args.images)
 
     for img, file_name in image_provider:
@@ -600,6 +600,10 @@ if __name__ == '__main__':
 
         # draw and save image
         img = draw_person_pose(img, poses)
+
+        print("type: {}".format(type(poses)))
+        print("shape: {}".format(poses.shape))
+        print(poses)
 
         resultDir = "data/image_result/"
         if not os.path.exists(resultDir):

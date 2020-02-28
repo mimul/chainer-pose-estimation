@@ -2,6 +2,9 @@
   <dictionary name="mimul">
     <words>
       <w>connection의</w>
+      <w>heatmap</w>
+      <w>heatmaps</w>
+      <w>ksize</w>
     </words>
   </dictionary>
 </component>

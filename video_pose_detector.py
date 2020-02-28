@@ -24,8 +24,6 @@ if __name__ == '__main__':
     # load model
     pose_detector = PoseDetector("posenet", "models/coco_posenet.npz", device=args.gpu)
 
-    print(args.video)
-
     resultDir = "data/video_result/"
 
     if not os.path.exists(resultDir):
