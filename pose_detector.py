@@ -12,6 +12,204 @@ from chainer import cuda, serializers, functions as F
 
 from entity import params, JointType
 from media_reader import ImageReader, get_filename_without_extension
+from logging import basicConfig, getLogger, DEBUG
+
+
+def create_gaussian_kernel(sigma=1, ksize=5):
+    center = int(ksize / 2)
+    grid_x = np.tile(np.arange(ksize), (ksize, 1))
+    grid_y = grid_x.transpose().copy()
+    grid_d2 = (grid_x - center) ** 2 + (grid_y - center) ** 2
+    kernel = 1 / (sigma ** 2 * 2 * np.pi) * np.exp(-0.5 * grid_d2 / sigma ** 2)
+    return kernel.astype('f')
+
+
+def pad_image(img, stride, pad_value):
+    h, w, _ = img.shape
+
+    pad = [0] * 2
+    pad[0] = (stride - (h % stride)) % stride  # down
+    pad[1] = (stride - (w % stride)) % stride  # right
+
+    img_padded = np.zeros((h + pad[0], w + pad[1], 3), 'uint8') + pad_value
+    img_padded[:h, :w, :] = img.copy()
+    return img_padded, pad
+
+
+def compute_optimal_size(orig_img, img_size, stride=8):
+    """이미지의 폭과 높이가 stride의 배수가 되도록 조절"""
+    orig_img_h, orig_img_w, _ = orig_img.shape
+    aspect = orig_img_h / orig_img_w
+    if orig_img_h < orig_img_w:
+        img_h = img_size
+        img_w = np.round(img_size / aspect).astype(int)
+        surplus = img_w % stride
+        if surplus != 0:
+            img_w += stride - surplus
+    else:
+        img_w = img_size
+        img_h = np.round(img_size * aspect).astype(int)
+        surplus = img_h % stride
+        if surplus != 0:
+            img_h += stride - surplus
+    return (img_w, img_h)
+
+
+def compute_candidate_connections(paf, cand_a, cand_b, img_len, params):
+    candidate_connections = []
+    for joint_a in cand_a:
+        for joint_b in cand_b:  # joint(x, y)좌표
+            vector = joint_b[:2] - joint_a[:2]
+            norm = np.linalg.norm(vector)
+            if norm == 0:
+                continue
+
+            ys = np.linspace(joint_a[1], joint_b[1], num=params['n_integ_points'])
+            xs = np.linspace(joint_a[0], joint_b[0], num=params['n_integ_points'])
+            integ_points = np.stack([ys, xs]).T.round().astype(
+                'i')  # joint_a와 joint_b의 2점 사이를 잇는 선분상의 좌표 점 [[x1, y1], [x2, y2]...]
+            paf_in_edge = np.hstack([paf[0][np.hsplit(integ_points, 2)], paf[1][np.hsplit(integ_points, 2)]])
+            unit_vector = vector / norm
+            inner_products = np.dot(paf_in_edge, unit_vector)
+
+            integ_value = inner_products.sum() / len(inner_products)
+            # vector의 길이가 기준치 이상일 때 패널티를 부여
+            integ_value_with_dist_prior = integ_value + min(
+                params['limb_length_ratio'] * img_len / norm - params['length_penalty_value'], 0)
+
+            n_valid_points = sum(inner_products > params['inner_product_thresh'])
+            if n_valid_points > params['n_integ_points_thresh'] and integ_value_with_dist_prior > 0:
+                candidate_connections.append([int(joint_a[3]), int(joint_b[3]), integ_value_with_dist_prior])
+    candidate_connections = sorted(candidate_connections, key=lambda x: x[2], reverse=True)
+    return candidate_connections
+
+
+def grouping_key_points(all_connections, candidate_peaks, params):
+    subsets = -1 * np.ones((0, 20))
+
+    for l, connections in enumerate(all_connections):
+        joint_a, joint_b = params['limbs_point'][l]
+
+        for ind_a, ind_b, score in connections[:, :3]:
+            ind_a, ind_b = int(ind_a), int(ind_b)
+
+            joint_found_cnt = 0
+            joint_found_subset_index = [-1, -1]
+            for subset_ind, subset in enumerate(subsets):
+                # connection의 joint를 가진 subset이 있다면
+                if subset[joint_a] == ind_a or subset[joint_b] == ind_b:
+                    joint_found_subset_index[joint_found_cnt] = subset_ind
+                    joint_found_cnt += 1
+
+            if joint_found_cnt == 1:  # connection중 한쪽의 joint를 subset이 가지고 있는 경우
+                found_subset = subsets[joint_found_subset_index[0]]
+                # 어깨->귀의 connection의 조합을 제외하고 시작점의 일치밖에 일어날 수 없다.
+                # 어깨->귀의 경우 종점이 일치했을 경우 이미 얼굴의 bone검출이 완료되었으므로 처리 불필요.
+                if found_subset[joint_b] != ind_b:
+                    found_subset[joint_b] = ind_b
+                    found_subset[-1] += 1  # increment joint count
+                    found_subset[-2] += candidate_peaks[ind_b, 3] + score  # joint b의 score와 connection의 적분값 가산
+
+            elif joint_found_cnt == 2:  # subset1에 joint1이, subset2에 joint2가 있는 경우(어깨->귀 connection의 조합한 일어날 수 없다)
+                # print('limb {}: 2 subsets have any joint'.format(l))
+                found_subset_1 = subsets[joint_found_subset_index[0]]
+                found_subset_2 = subsets[joint_found_subset_index[1]]
+
+                membership = ((found_subset_1 >= 0).astype(int) + (found_subset_2 >= 0).astype(int))[:-2]
+                if not np.any(membership == 2):  # merge two subsets when no duplication
+                    found_subset_1[:-2] += found_subset_2[:-2] + 1  # default is -1
+                    found_subset_1[-2:] += found_subset_2[-2:]
+                    found_subset_1[-2:] += score  # connection 적분값만 가산(joint의 score는 merge시에 모두 가산완료)
+                    subsets = np.delete(subsets, joint_found_subset_index[1], axis=0)
+                else:
+                    if found_subset_1[joint_a] == -1:
+                        found_subset_1[joint_a] = ind_a
+                        found_subset_1[-1] += 1
+                        found_subset_1[-2] += candidate_peaks[ind_a, 3] + score
+                    elif found_subset_1[joint_b] == -1:
+                        found_subset_1[joint_b] = ind_b
+                        found_subset_1[-1] += 1
+                        found_subset_1[-2] += candidate_peaks[ind_b, 3] + score
+                    if found_subset_2[joint_a] == -1:
+                        found_subset_2[joint_a] = ind_a
+                        found_subset_2[-1] += 1
+                        found_subset_2[-2] += candidate_peaks[ind_a, 3] + score
+                    elif found_subset_2[joint_b] == -1:
+                        found_subset_2[joint_b] = ind_b
+                        found_subset_2[-1] += 1
+                        found_subset_2[-2] += candidate_peaks[ind_b, 3] + score
+
+            elif joint_found_cnt == 0 and l != 9 and l != 13:  # 신규 subset 작성, 어깨이 connection은 신규 group 대상 외
+                row = -1 * np.ones(20)
+                row[joint_a] = ind_a
+                row[joint_b] = ind_b
+                row[-1] = 2
+                row[-2] = sum(candidate_peaks[[ind_a, ind_b], 3]) + score
+                subsets = np.vstack([subsets, row])
+            elif joint_found_cnt >= 3:
+                pass
+
+    # delete low score subsets
+    keep = np.logical_and(subsets[:, -1] >= params['n_subset_limbs_thresh'],
+                          subsets[:, -2] / subsets[:, -1] >= params['subset_score_thresh'])
+    subsets = subsets[keep]
+    return subsets
+
+
+def subsets_to_pose_array(subsets, all_peaks):
+    person_pose_array = []
+    for subset in subsets:
+        joints = []
+        for joint_index in subset[:18].astype('i'):
+            if joint_index >= 0:
+                joint = all_peaks[joint_index][1:3].tolist()
+                joint.append(2)
+                joints.append(joint)
+            else:
+                joints.append([0, 0, 0])
+        person_pose_array.append(np.array(joints))
+    person_pose_array = np.array(person_pose_array)
+    return person_pose_array
+
+
+def compute_limbs_length(joints):
+    limbs = []
+    limbs_len = np.zeros(len(params["limbs_point"]))
+    for i, joint_indices in enumerate(params["limbs_point"]):
+        if joints[joint_indices[0]] is not None and joints[joint_indices[1]] is not None:
+            limbs.append([joints[joint_indices[0]], joints[joint_indices[1]]])
+            limbs_len[i] = np.linalg.norm(joints[joint_indices[1]][:-1] - joints[joint_indices[0]][:-1])
+        else:
+            limbs.append(None)
+
+    return limbs_len, limbs
+
+
+def compute_unit_length(limbs_len):
+    unit_length = 0
+    # (콧목, 목 왼쪽 허리, 목 오른쪽 허리, 어깨 왼쪽 귀, 어깨 오른쪽 귀) 길이의 비율
+    # (이 중 하나가 존재하면 이를 우선적으로 단위 길이로 계산한다).
+    base_limbs_len = limbs_len[[14, 3, 0, 13, 9]]
+    non_zero_limbs_len = base_limbs_len > 0
+    if len(np.nonzero(non_zero_limbs_len)[0]) > 0:
+        limbs_len_ratio = np.array([0.85, 2.2, 2.2, 0.85, 0.85])
+        unit_length = np.sum(base_limbs_len[non_zero_limbs_len] / limbs_len_ratio[non_zero_limbs_len]) / len(
+            np.nonzero(non_zero_limbs_len)[0])
+    else:
+        limbs_len_ratio = np.array(
+            [2.2, 1.7, 1.7, 2.2, 1.7, 1.7, 0.6, 0.93, 0.65, 0.85, 0.6, 0.93, 0.65, 0.85, 1, 0.2, 0.2, 0.25, 0.25])
+        non_zero_limbs_len = limbs_len > 0
+        unit_length = np.sum(limbs_len[non_zero_limbs_len] / limbs_len_ratio[non_zero_limbs_len]) / len(
+            np.nonzero(non_zero_limbs_len)[0])
+
+    return unit_length
+
+
+def get_unit_length(person_pose):
+    limbs_length, limbs = compute_limbs_length(person_pose)
+    unit_length = compute_unit_length(limbs_length)
+
+    return unit_length
 
 
 class PoseDetector(object):
@@ -33,46 +231,10 @@ class PoseDetector(object):
             self.model.to_gpu()
 
             # create gaussian filter
-            self.gaussian_kernel = self.create_gaussian_kernel(params['gaussian_sigma'], params['ksize'])[None, None]
+            self.gaussian_kernel = create_gaussian_kernel(params['gaussian_sigma'], params['ksize'])[None, None]
             self.gaussian_kernel = cuda.to_gpu(self.gaussian_kernel)
 
     # compute gaussian filter
-    def create_gaussian_kernel(self, sigma=1, ksize=5):
-        center = int(ksize / 2)
-        grid_x = np.tile(np.arange(ksize), (ksize, 1))
-        grid_y = grid_x.transpose().copy()
-        grid_d2 = (grid_x - center) ** 2 + (grid_y - center) ** 2
-        kernel = 1 / (sigma ** 2 * 2 * np.pi) * np.exp(-0.5 * grid_d2 / sigma ** 2)
-        return kernel.astype('f')
-
-    def pad_image(self, img, stride, pad_value):
-        h, w, _ = img.shape
-
-        pad = [0] * 2
-        pad[0] = (stride - (h % stride)) % stride  # down
-        pad[1] = (stride - (w % stride)) % stride  # right
-
-        img_padded = np.zeros((h + pad[0], w + pad[1], 3), 'uint8') + pad_value
-        img_padded[:h, :w, :] = img.copy()
-        return img_padded, pad
-
-    def compute_optimal_size(self, orig_img, img_size, stride=8):
-        """이미지의 폭과 높이가 stride의 배수가 되도록 조절"""
-        orig_img_h, orig_img_w, _ = orig_img.shape
-        aspect = orig_img_h / orig_img_w
-        if orig_img_h < orig_img_w:
-            img_h = img_size
-            img_w = np.round(img_size / aspect).astype(int)
-            surplus = img_w % stride
-            if surplus != 0:
-                img_w += stride - surplus
-        else:
-            img_w = img_size
-            img_h = np.round(img_size * aspect).astype(int)
-            surplus = img_h % stride
-            if surplus != 0:
-                img_h += stride - surplus
-        return (img_w, img_h)
 
     def compute_peaks_from_heatmaps(self, heatmaps):
         """all_peaks: shape = [N, 5], column = (jointtype, x, y, score, index)"""
@@ -134,34 +296,6 @@ class PoseDetector(object):
             all_peaks = all_peaks.get()
         return all_peaks
 
-    def compute_candidate_connections(self, paf, cand_a, cand_b, img_len, params):
-        candidate_connections = []
-        for joint_a in cand_a:
-            for joint_b in cand_b:  # joint(x, y)좌표
-                vector = joint_b[:2] - joint_a[:2]
-                norm = np.linalg.norm(vector)
-                if norm == 0:
-                    continue
-
-                ys = np.linspace(joint_a[1], joint_b[1], num=params['n_integ_points'])
-                xs = np.linspace(joint_a[0], joint_b[0], num=params['n_integ_points'])
-                integ_points = np.stack([ys, xs]).T.round().astype(
-                    'i')  # joint_a와 joint_b의 2점 사이를 잇는 선분상의 좌표 점 [[x1, y1], [x2, y2]...]
-                paf_in_edge = np.hstack([paf[0][np.hsplit(integ_points, 2)], paf[1][np.hsplit(integ_points, 2)]])
-                unit_vector = vector / norm
-                inner_products = np.dot(paf_in_edge, unit_vector)
-
-                integ_value = inner_products.sum() / len(inner_products)
-                # vector의 길이가 기준치 이상일 때 패널티를 부여
-                integ_value_with_dist_prior = integ_value + min(
-                    params['limb_length_ratio'] * img_len / norm - params['length_penalty_value'], 0)
-
-                n_valid_points = sum(inner_products > params['inner_product_thresh'])
-                if n_valid_points > params['n_integ_points_thresh'] and integ_value_with_dist_prior > 0:
-                    candidate_connections.append([int(joint_a[3]), int(joint_b[3]), integ_value_with_dist_prior])
-        candidate_connections = sorted(candidate_connections, key=lambda x: x[2], reverse=True)
-        return candidate_connections
-
     def compute_connections(self, pafs, all_peaks, img_len, params):
         all_connections = []
         for i in range(len(params['limbs_point'])):
@@ -172,7 +306,7 @@ class PoseDetector(object):
             cand_b = all_peaks[all_peaks[:, 0] == limb_point[1]][:, 1:]
 
             if len(cand_a) > 0 and len(cand_b) > 0:
-                candidate_connections = self.compute_candidate_connections(paf, cand_a, cand_b, img_len, params)
+                candidate_connections = compute_candidate_connections(paf, cand_a, cand_b, img_len, params)
                 connections = np.zeros((0, 3))
                 for index_a, index_b, score in candidate_connections:
                     if index_a not in connections[:, 0] and index_b not in connections[:, 1]:
@@ -184,130 +318,7 @@ class PoseDetector(object):
                 all_connections.append(np.zeros((0, 3)))
         return all_connections
 
-    def grouping_key_points(self, all_connections, candidate_peaks, params):
-        subsets = -1 * np.ones((0, 20))
-
-        for l, connections in enumerate(all_connections):
-            joint_a, joint_b = params['limbs_point'][l]
-
-            for ind_a, ind_b, score in connections[:, :3]:
-                ind_a, ind_b = int(ind_a), int(ind_b)
-
-                joint_found_cnt = 0
-                joint_found_subset_index = [-1, -1]
-                for subset_ind, subset in enumerate(subsets):
-                    # connection의 joint를 가진 subset이 있다면
-                    if subset[joint_a] == ind_a or subset[joint_b] == ind_b:
-                        joint_found_subset_index[joint_found_cnt] = subset_ind
-                        joint_found_cnt += 1
-
-                if joint_found_cnt == 1:  # connection중 한쪽의 joint를 subset이 가지고 있는 경우
-                    found_subset = subsets[joint_found_subset_index[0]]
-                    # 어깨->귀의 connection의 조합을 제외하고 시작점의 일치밖에 일어날 수 없다.
-                    # 어깨->귀의 경우 종점이 일치했을 경우 이미 얼굴의 bone검출이 완료되었으므로 처리 불필요.
-                    if found_subset[joint_b] != ind_b:
-                        found_subset[joint_b] = ind_b
-                        found_subset[-1] += 1  # increment joint count
-                        found_subset[-2] += candidate_peaks[ind_b, 3] + score  # joint b의 score와 connection의 적분값 가산
-
-                elif joint_found_cnt == 2:  # subset1에 joint1이, subset2에 joint2가 있는 경우(어깨->귀 connection의 조합한 일어날 수 없다)
-                    # print('limb {}: 2 subsets have any joint'.format(l))
-                    found_subset_1 = subsets[joint_found_subset_index[0]]
-                    found_subset_2 = subsets[joint_found_subset_index[1]]
-
-                    membership = ((found_subset_1 >= 0).astype(int) + (found_subset_2 >= 0).astype(int))[:-2]
-                    if not np.any(membership == 2):  # merge two subsets when no duplication
-                        found_subset_1[:-2] += found_subset_2[:-2] + 1  # default is -1
-                        found_subset_1[-2:] += found_subset_2[-2:]
-                        found_subset_1[-2:] += score  # connection 적분값만 가산(joint의 score는 merge시에 모두 가산완료)
-                        subsets = np.delete(subsets, joint_found_subset_index[1], axis=0)
-                    else:
-                        if found_subset_1[joint_a] == -1:
-                            found_subset_1[joint_a] = ind_a
-                            found_subset_1[-1] += 1
-                            found_subset_1[-2] += candidate_peaks[ind_a, 3] + score
-                        elif found_subset_1[joint_b] == -1:
-                            found_subset_1[joint_b] = ind_b
-                            found_subset_1[-1] += 1
-                            found_subset_1[-2] += candidate_peaks[ind_b, 3] + score
-                        if found_subset_2[joint_a] == -1:
-                            found_subset_2[joint_a] = ind_a
-                            found_subset_2[-1] += 1
-                            found_subset_2[-2] += candidate_peaks[ind_a, 3] + score
-                        elif found_subset_2[joint_b] == -1:
-                            found_subset_2[joint_b] = ind_b
-                            found_subset_2[-1] += 1
-                            found_subset_2[-2] += candidate_peaks[ind_b, 3] + score
-
-                elif joint_found_cnt == 0 and l != 9 and l != 13:  # 신규 subset 작성, 어깨이 connection은 신규 group 대상 외
-                    row = -1 * np.ones(20)
-                    row[joint_a] = ind_a
-                    row[joint_b] = ind_b
-                    row[-1] = 2
-                    row[-2] = sum(candidate_peaks[[ind_a, ind_b], 3]) + score
-                    subsets = np.vstack([subsets, row])
-                elif joint_found_cnt >= 3:
-                    pass
-
-        # delete low score subsets
-        keep = np.logical_and(subsets[:, -1] >= params['n_subset_limbs_thresh'],
-                              subsets[:, -2] / subsets[:, -1] >= params['subset_score_thresh'])
-        subsets = subsets[keep]
-        return subsets
-
-    def subsets_to_pose_array(self, subsets, all_peaks):
-        person_pose_array = []
-        for subset in subsets:
-            joints = []
-            for joint_index in subset[:18].astype('i'):
-                if joint_index >= 0:
-                    joint = all_peaks[joint_index][1:3].tolist()
-                    joint.append(2)
-                    joints.append(joint)
-                else:
-                    joints.append([0, 0, 0])
-            person_pose_array.append(np.array(joints))
-        person_pose_array = np.array(person_pose_array)
-        return person_pose_array
-
-    def compute_limbs_length(self, joints):
-        limbs = []
-        limbs_len = np.zeros(len(params["limbs_point"]))
-        for i, joint_indices in enumerate(params["limbs_point"]):
-            if joints[joint_indices[0]] is not None and joints[joint_indices[1]] is not None:
-                limbs.append([joints[joint_indices[0]], joints[joint_indices[1]]])
-                limbs_len[i] = np.linalg.norm(joints[joint_indices[1]][:-1] - joints[joint_indices[0]][:-1])
-            else:
-                limbs.append(None)
-
-        return limbs_len, limbs
-
-    def compute_unit_length(self, limbs_len):
-        unit_length = 0
-        # (콧목, 목 왼쪽 허리, 목 오른쪽 허리, 어깨 왼쪽 귀, 어깨 오른쪽 귀) 길이의 비율
-        # (이 중 하나가 존재하면 이를 우선적으로 단위 길이로 계산한다).
-        base_limbs_len = limbs_len[[14, 3, 0, 13, 9]]
-        non_zero_limbs_len = base_limbs_len > 0
-        if len(np.nonzero(non_zero_limbs_len)[0]) > 0:
-            limbs_len_ratio = np.array([0.85, 2.2, 2.2, 0.85, 0.85])
-            unit_length = np.sum(base_limbs_len[non_zero_limbs_len] / limbs_len_ratio[non_zero_limbs_len]) / len(
-                np.nonzero(non_zero_limbs_len)[0])
-        else:
-            limbs_len_ratio = np.array(
-                [2.2, 1.7, 1.7, 2.2, 1.7, 1.7, 0.6, 0.93, 0.65, 0.85, 0.6, 0.93, 0.65, 0.85, 1, 0.2, 0.2, 0.25, 0.25])
-            non_zero_limbs_len = limbs_len > 0
-            unit_length = np.sum(limbs_len[non_zero_limbs_len] / limbs_len_ratio[non_zero_limbs_len]) / len(
-                np.nonzero(non_zero_limbs_len)[0])
-
-        return unit_length
-
-    def get_unit_length(self, person_pose):
-        limbs_length, limbs = self.compute_limbs_length(person_pose)
-        unit_length = self.compute_unit_length(limbs_length)
-
-        return unit_length
-
-    def crop_around_keypoint(self, img, keypoint, crop_size):
+    def crop_around_keypoint(self, img: object, keypoint: object, crop_size: object) -> object:
         x, y = keypoint
         left = int(x - crop_size)
         top = int(y - crop_size)
@@ -455,7 +466,7 @@ class PoseDetector(object):
             img = cv2.resize(orig_img, (math.ceil(orig_img_w * multiplier), math.ceil(orig_img_h * multiplier)),
                              interpolation=interpolation)
             bbox = (params['inference_img_size'], max(params['inference_img_size'], img.shape[1]))
-            padded_img, pad = self.pad_image(img, params['downscale'], (104, 117, 123))
+            padded_img, pad = pad_image(img, params['downscale'], (104, 117, 123))
 
             x_data = self.preprocess(padded_img)
             if self.device >= 0:
@@ -490,8 +501,8 @@ class PoseDetector(object):
         if len(self.all_peaks) == 0:
             return np.empty((0, len(JointType), 3)), np.empty(0)
         all_connections = self.compute_connections(self.pafs, self.all_peaks, orig_img_w, params)
-        subsets = self.grouping_key_points(all_connections, self.all_peaks, params)
-        poses = self.subsets_to_pose_array(subsets, self.all_peaks)
+        subsets = grouping_key_points(all_connections, self.all_peaks, params)
+        poses = subsets_to_pose_array(subsets, self.all_peaks)
         scores = subsets[:, -2]
         return poses, scores
 
@@ -501,8 +512,8 @@ class PoseDetector(object):
             return self.detect_precise(orig_img)
         orig_img_h, orig_img_w, _ = orig_img.shape
 
-        input_w, input_h = self.compute_optimal_size(orig_img, params['inference_img_size'])
-        map_w, map_h = self.compute_optimal_size(orig_img, params['heatmap_size'])
+        input_w, input_h = compute_optimal_size(orig_img, params['inference_img_size'])
+        map_w, map_h = compute_optimal_size(orig_img, params['heatmap_size'])
 
         resized_image = cv2.resize(orig_img, (input_w, input_h))
         x_data = self.preprocess(resized_image)
@@ -523,10 +534,10 @@ class PoseDetector(object):
         if len(all_peaks) == 0:
             return np.empty((0, len(JointType), 3)), np.empty(0)
         all_connections = self.compute_connections(pafs, all_peaks, map_w, params)
-        subsets = self.grouping_key_points(all_connections, all_peaks, params)
+        subsets = grouping_key_points(all_connections, all_peaks, params)
         all_peaks[:, 1] *= orig_img_w / map_w
         all_peaks[:, 2] *= orig_img_h / map_h
-        poses = self.subsets_to_pose_array(subsets, all_peaks)
+        poses = subsets_to_pose_array(subsets, all_peaks)
         scores = subsets[:, -2]
         return poses, scores
 
@@ -568,6 +579,8 @@ def draw_person_pose(orig_img, poses):
 
 
 if __name__ == '__main__':
+    basicConfig(level=DEBUG)
+    logger = getLogger(__name__)
     parser = argparse.ArgumentParser(description='Pose detector')
     parser.add_argument('arch', choices=params['archs'].keys(), default='posenet', help='Model architecture')
     parser.add_argument('weights', help='weights file path')
@@ -586,7 +599,7 @@ if __name__ == '__main__':
     # load model
     pose_detector = PoseDetector(args.arch, args.weights, device=args.gpu, precise=args.precise)
 
-    print(args.images)
+    logger.debug(args.images)
 
     # 이미지 읽기
     image_provider = ImageReader(args.images)
@@ -601,9 +614,9 @@ if __name__ == '__main__':
         # draw and save image
         img = draw_person_pose(img, poses)
 
-        print("type: {}".format(type(poses)))
-        print("shape: {}".format(poses.shape))
-        print(poses)
+        logger.debug("type: {}".format(type(poses)))
+        logger.debug("shape: {}".format(poses.shape))
+        logger.debug(poses)
 
         resultDir = "data/image_result/"
         if not os.path.exists(resultDir):
@@ -612,5 +625,5 @@ if __name__ == '__main__':
         file_body_name = get_filename_without_extension(file_name)
         file_append_name = '_result.png'
 
-        print('Saving file into {}{}{}'.format(resultDir, file_body_name, file_append_name))
+        logger.debug('Saving file into {}{}{}'.format(resultDir, file_body_name, file_append_name))
         cv2.imwrite(resultDir + file_body_name + file_append_name, img)

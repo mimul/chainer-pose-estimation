@@ -6,10 +6,13 @@ import chainer
 
 from media_reader import VideoReader, get_filename_without_extension
 from pose_detector import PoseDetector, draw_person_pose
+from logging import basicConfig, getLogger, DEBUG
 
 chainer.using_config('enable_backprop', False)
 
 if __name__ == '__main__':
+    basicConfig(level=DEBUG)
+    logger = getLogger(__name__)
     parser = argparse.ArgumentParser(description='Pose detector')
     parser.add_argument('--video', type=str, default='', help='video file path')
     parser.add_argument('--gpu', '-g', type=int, default=-1, help='GPU ID (negative value indicates CPU)')
@@ -37,8 +40,11 @@ if __name__ == '__main__':
     video_provider = VideoReader(args.video)
     idx = 0
     for img in video_provider:
-        person_pose_array, _ = pose_detector(img)
-        res_img = cv2.addWeighted(img, 0.6, draw_person_pose(img, person_pose_array), 0.4, 0)
+        poses, _ = pose_detector(img)
+        res_img = cv2.addWeighted(img, 0.6, draw_person_pose(img, poses), 0.4, 0)
+        logger.debug("type: {}".format(type(poses)))
+        logger.debug("shape: {}".format(poses.shape))
+        logger.debug(poses)
         # cv2.imshow(file_body_name + '_result', res_img)
         video.write(res_img)
         # print('Saving file into {}{}{}{}'.format(resultDir, file_body_name, str(idx), file_append_name))
