@@ -37,7 +37,7 @@ class CocoDataLoader(object):
             mask = self.coco.annToMask(ann).astype('bool')
             if ann['iscrowd'] == 1:
                 intxn = mask_all & mask
-                mask_miss = mask_miss | (mask - intxn)
+                mask_miss = mask_miss | np.bitwise_xor(mask, intxn)
                 mask_all = mask_all | mask
             elif ann['num_keypoints'] < params['min_keypoints'] or ann['area'] <= params['min_area']:
                 mask_all = mask_all | mask
